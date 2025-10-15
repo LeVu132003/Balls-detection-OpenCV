@@ -7,6 +7,8 @@ import json
 import sys
 import argparse
 
+TABLE_CORNERS_FILE = "table_corners.json"
+
 def get_ball_number(b, g, r, brightness, detect_cue_ball=False):
     """
     Xác định số thứ tự bi dựa trên màu BGR và độ sáng trung bình
@@ -99,6 +101,37 @@ def detect_circles(image_path, annotated_output_path, json_output_path, detect_c
     
     # Tạo bản sao để vẽ
     output = img.copy()
+
+    # Load table corners and compute perspective transform to table coordinate system
+    table_corners = None
+    transform_M = None
+    table_size = None
+    try:
+        with open(TABLE_CORNERS_FILE, 'r', encoding='utf-8') as f:
+            tc = json.load(f)
+            # Expecting structure { "table_corners": [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] }
+            if 'table_corners' in tc and len(tc['table_corners']) == 4:
+                table_corners = np.array(tc['table_corners'], dtype=np.float32)
+                # We'll map these to a rectangular table coordinate system with origin at top-left
+                # Compute width and height from corners (take max of opposing edges)
+                widthA = np.linalg.norm(table_corners[1] - table_corners[0])
+                widthB = np.linalg.norm(table_corners[2] - table_corners[3])
+                maxWidth = int(max(widthA, widthB))
+
+                heightA = np.linalg.norm(table_corners[3] - table_corners[0])
+                heightB = np.linalg.norm(table_corners[2] - table_corners[1])
+                maxHeight = int(max(heightA, heightB))
+
+                table_size = (maxWidth, maxHeight)
+
+                dst = np.array([[0, 0], [maxWidth - 1, 0], [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1]], dtype=np.float32)
+                transform_M = cv2.getPerspectiveTransform(table_corners, dst)
+            else:
+                print(f"Warning: '{TABLE_CORNERS_FILE}' not in expected format. Falling back to image coordinates.")
+    except FileNotFoundError:
+        print(f"Warning: '{TABLE_CORNERS_FILE}' not found. Falling back to image coordinates.")
+    except Exception as e:
+        print(f"Warning: failed to load '{TABLE_CORNERS_FILE}': {e}. Falling back to image coordinates.")
     
     # Tách các kênh màu để bảo toàn thông tin màu sắc
     b, g, r = cv2.split(img)
@@ -179,8 +212,17 @@ def detect_circles(image_path, annotated_output_path, json_output_path, detect_c
         ball_number = ball['number']
         
         # In thông tin màu sắc và số bi ra màn hình
-        print(f"Bi số {ball_number if ball_number > 0 else 'Không xác định'}:")
-        print(f"  Tọa độ: ({center[0]}, {center[1]})")
+        # If we have a perspective transform, map the center to table coordinates
+        if transform_M is not None:
+            src_pt = np.array([[[center[0], center[1]]]], dtype=np.float32)
+            dst_pt = cv2.perspectiveTransform(src_pt, transform_M)[0][0]
+            table_x, table_y = int(dst_pt[0]), int(dst_pt[1])
+            coord_text = f"({table_x}, {table_y})"
+            print(f"Bi số {ball_number if ball_number > 0 else 'Không xác định'}:")
+            print(f"  Tọa độ (bàn): {coord_text}")
+        else:
+            print(f"Bi số {ball_number if ball_number > 0 else 'Không xác định'}:")
+            print(f"  Tọa độ (ảnh): ({center[0]}, {center[1]})")
         print(f"  Bán kính: {radius}")
         print(f"  Màu BGR: B={b_avg:.1f}, G={g_avg:.1f}, R={r_avg:.1f}")
         print(f"  Màu RGB: R={r_avg:.1f}, G={g_avg:.1f}, B={b_avg:.1f}")
@@ -195,23 +237,33 @@ def detect_circles(image_path, annotated_output_path, json_output_path, detect_c
         cv2.circle(output, center, radius, (0, 0, 0), 3)  # Border đen dày 3px
         cv2.circle(output, center, 2, (0, 0, 0), 3)  # Tâm màu đen
         
-        # Hiển thị số bi và tọa độ
+        # Hiển thị số bi và tọa độ (hiển thị toạ độ bàn nếu có)
         if ball_number > 0:
             cv2.putText(output, f'Ball {ball_number}', 
                       (center[0] - 25, center[1] - radius - 10),
                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60, 60, 60), 1)  # Text màu xám nhạt
             # Hiển thị tọa độ bên phải viên bi
-            cv2.putText(output, f'({center[0]},{center[1]})', 
-                      (center[0] + radius + 8, center[1] + 5),
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.35, (60, 60, 60), 1)  # Text màu xám nhạt
+            if transform_M is not None:
+                cv2.putText(output, coord_text, 
+                          (center[0] + radius + 8, center[1] + 5),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.35, (60, 60, 60), 1)
+            else:
+                cv2.putText(output, f'({center[0]},{center[1]})', 
+                          (center[0] + radius + 8, center[1] + 5),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.35, (60, 60, 60), 1)  # Text màu xám nhạt
         else:
             cv2.putText(output, f'Ball ?', 
                       (center[0] - 15, center[1] - radius - 10),
                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60, 60, 60), 1)  # Text màu xám nhạt
             # Hiển thị tọa độ bên phải viên bi cho bi không xác định được số
-            cv2.putText(output, f'({center[0]},{center[1]})', 
-                      (center[0] + radius + 8, center[1] + 5),
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.35, (60, 60, 60), 1)  # Text màu xám nhạt
+            if transform_M is not None:
+                cv2.putText(output, coord_text, 
+                          (center[0] + radius + 8, center[1] + 5),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.35, (60, 60, 60), 1)
+            else:
+                cv2.putText(output, f'({center[0]},{center[1]})', 
+                          (center[0] + radius + 8, center[1] + 5),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.35, (60, 60, 60), 1)  # Text màu xám nhạt
     
     # Đếm số hình tròn được phát hiện
     ball_count = len(detected_balls)
@@ -227,10 +279,31 @@ def detect_circles(image_path, annotated_output_path, json_output_path, detect_c
     # Tạo dữ liệu JSON với tọa độ các bi
     balls_data = []
     for ball in detected_balls:
+        # Map to table coordinates if transform available
+        cx, cy = ball['center']
+        if transform_M is not None:
+            src_pt = np.array([[[cx, cy]]], dtype=np.float32)
+            dst_pt = cv2.perspectiveTransform(src_pt, transform_M)[0][0]
+            tx, ty = int(dst_pt[0]), int(dst_pt[1])
+        else:
+            tx, ty = int(cx), int(cy)
+
+        # Determine normalization base (table size if available, otherwise image size)
+        if table_size is not None:
+            norm_w, norm_h = table_size[0], table_size[1]
+        else:
+            norm_w, norm_h = img.shape[1], img.shape[0]
+
+        # Avoid division by zero
+        x_norm = float(tx) / float(norm_w) if norm_w > 0 else 0.0
+        y_norm = float(ty) / float(norm_h) if norm_h > 0 else 0.0
+
         ball_data = {
             "number": int(ball['number']),
-            "x": int(ball['center'][0]),
-            "y": int(ball['center'][1])
+            "x": tx,
+            "y": ty,
+            "x_norm": round(x_norm, 6),
+            "y_norm": round(y_norm, 6)
         }
         balls_data.append(ball_data)
     
@@ -238,6 +311,9 @@ def detect_circles(image_path, annotated_output_path, json_output_path, detect_c
     json_data = {
         "balls": balls_data
     }
+    # If we computed table size, include it so consumers know coordinate space
+    if table_size is not None:
+        json_data['table_size'] = {"width": int(table_size[0]), "height": int(table_size[1])}
     
     # Lưu file JSON
     with open(json_output_path, 'w', encoding='utf-8') as f:
